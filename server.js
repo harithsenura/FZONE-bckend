@@ -248,7 +248,10 @@ app.get('/api/friends/requests', async (req, res) => {
       status: 'pending'
     }).populate('fromUser', 'name avatar');
     
-    res.json(requests);
+    // Filter out requests where user might have been deleted (null fromUser)
+    const validRequests = requests.filter(r => r.fromUser !== null);
+    
+    res.json(validRequests);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

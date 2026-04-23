@@ -257,34 +257,6 @@ app.get('/api/friends/requests', async (req, res) => {
   }
 });
 
-// Get friends list/count for a user
-app.get('/api/friends/list/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const friends = await FriendRequest.find({
-      $or: [{ fromUser: userId }, { toUser: userId }],
-      status: 'accepted'
-    }).populate('fromUser', 'avatar').populate('toUser', 'avatar').limit(10);
-
-    const formattedFriends = friends.map(f => {
-      // Need to return the "other" user (not the one we are looking at)
-      return f.fromUser._id.toString() === userId ? f.toUser : f.fromUser;
-    });
-
-    const totalCount = await FriendRequest.countDocuments({
-      $or: [{ fromUser: userId }, { toUser: userId }],
-      status: 'accepted'
-    });
-
-    res.json({
-      friends: formattedFriends.slice(0, 3), // Return only 3 for UI pictures
-      totalCount
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Accept request
 app.post('/api/friends/accept', async (req, res) => {
   try {
@@ -297,6 +269,26 @@ app.post('/api/friends/accept', async (req, res) => {
     await request.save();
     
     res.json({ message: 'Request accepted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get friends list
+app.get('/api/friends/list/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const friendships = await FriendRequest.find({
+      $or: [{ fromUser: userId }, { toUser: userId }],
+      status: 'accepted'
+    }).populate('fromUser toUser', 'name avatar');
+    
+    const friends = friendships.map(f => {
+      if (!f.fromUser || !f.toUser) return null;
+      return f.fromUser._id.toString() === userId ? f.toUser : f.fromUser;
+    }).filter(f => f !== null);
+    
+    res.json(friends);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

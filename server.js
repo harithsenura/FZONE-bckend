@@ -175,9 +175,8 @@ app.get('/api/users/search', async (req, res) => {
 // Get friend status
 app.get('/api/friends/status/:userId', async (req, res) => {
   try {
-    // In a real app, you'd get the current user from auth middleware
-    // For now, let's assume a hardcoded current user if not provided
-    const fromUserId = req.query.currentUserId || "66275896e95bf0885e3a89a1"; // Example ID
+    const fromUserId = req.query.currentUserId;
+    if (!fromUserId) return res.status(400).json({ error: 'currentUserId required' });
     const toUserId = req.params.userId;
 
     const request = await FriendRequest.findOne({
@@ -242,7 +241,8 @@ app.post('/api/friends/request', async (req, res) => {
 // Get all pending requests
 app.get('/api/friends/requests', async (req, res) => {
   try {
-    const userId = "66275896e95bf0885e3a89a1"; // Mocking current user
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
     const requests = await FriendRequest.find({
       toUser: userId,
       status: 'pending'

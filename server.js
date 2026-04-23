@@ -207,8 +207,8 @@ app.get('/api/friends/status/:userId', async (req, res) => {
 // Send friend request
 app.post('/api/friends/request', async (req, res) => {
   try {
-    const { toUserId, fromUserId: passedFromId } = req.body;
-    const fromUserId = passedFromId || "66275896e95bf0885e3a89a1"; // Current logged in user
+    const { toUserId, fromUserId } = req.body;
+    if (!fromUserId || !toUserId) return res.status(400).json({ error: 'IDs required' });
 
     const existingRequest = await FriendRequest.findOne({
       fromUser: fromUserId,
@@ -269,6 +269,22 @@ app.post('/api/friends/accept', async (req, res) => {
     await request.save();
     
     res.json({ message: 'Request accepted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cancel request / Remove friend
+app.post('/api/friends/cancel', async (req, res) => {
+  try {
+    const { toUserId, fromUserId } = req.body;
+    await FriendRequest.findOneAndDelete({
+      $or: [
+        { fromUser: fromUserId, toUser: toUserId },
+        { fromUser: toUserId, toUser: fromUserId }
+      ]
+    });
+    res.json({ message: 'Deleted' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

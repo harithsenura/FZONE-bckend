@@ -6,6 +6,7 @@ const connectDB = require('./config/database');
 const Message = require('./models/Message');
 const User = require('./models/User');
 const Post = require('./models/Post');
+const FriendRequest = require('./models/FriendRequest');
 
 const app = express();
 const server = http.createServer(app);
@@ -149,6 +150,117 @@ app.put('/api/auth/profile/:id', async (req, res) => {
   } catch (error) {
     console.error('Error updating profile:', error);
     res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// Search Users
+app.get('/api/users/search', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q) return res.json([]);
+    
+    const users = await User.find({
+      name: { $regex: q, $options: 'i' }
+    }).select('name avatar bio').limit(10);
+    
+    res.json(users);
+  } catch (error) {
+    console.error('Error searching users:', error);
+    res.status(500).json({ error: 'Failed to search users' });
+  }
+});
+
+// ========== Friendship Routes ==========
+
+// Get friend status
+app.get('/api/friends/status/:userId', async (req, res) => {
+  try {
+    // In a real app, you'd get the current user from auth middleware
+    // For now, let's assume a hardcoded current user if not provided
+    const fromUserId = req.query.currentUserId || "66275896e95bf0885e3a89a1"; // Example ID
+    const toUserId = req.params.userId;
+
+    const request = await FriendRequest.findOne({
+      $or: [
+        { fromUser: fromUserId, toUser: toUserId },
+        { fromUser: toUserId, toUser: fromUserId }
+      ]
+    });
+
+    if (!request) {
+      return res.json({ status: 'none' });
+    }
+
+    if (request.status === 'accepted') {
+      return res.json({ status: 'friends' });
+    }
+
+    if (request.fromUser.toString() === fromUserId) {
+      return res.json({ status: 'requested' });
+    }
+
+    res.json({ status: 'pending' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Send friend request
+app.post('/api/friends/request', async (req, res) => {
+  try {
+    const { toUserId } = req.body;
+    const fromUserId = "66275896e95bf0885e3a89a1"; // Mocking current user
+
+    const existingRequest = await FriendRequest.findOne({
+      fromUser: fromUserId,
+      toUser: toUserId
+    });
+
+    if (existingRequest) {
+      return res.status(400).json({ error: 'Request already sent' });
+    }
+
+    const newRequest = new FriendRequest({
+      fromUser: fromUserId,
+      toUser: toUserId
+    });
+
+    await newRequest.save();
+    res.status(201).json(newRequest);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all pending requests
+app.get('/api/friends/requests', async (req, res) => {
+  try {
+    const userId = "66275896e95bf0885e3a89a1"; // Mocking current user
+    const requests = await FriendRequest.find({
+      toUser: userId,
+      status: 'pending'
+    }).populate('fromUser', 'name avatar');
+    
+    res.json(requests);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Accept request
+app.post('/api/friends/accept', async (req, res) => {
+  try {
+    const { requestId } = req.body;
+    const request = await FriendRequest.findById(requestId);
+    
+    if (!request) return res.status(404).json({ error: 'Request not found' });
+    
+    request.status = 'accepted';
+    await request.save();
+    
+    res.json({ message: 'Request accepted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

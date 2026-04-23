@@ -208,8 +208,8 @@ app.get('/api/friends/status/:userId', async (req, res) => {
 // Send friend request
 app.post('/api/friends/request', async (req, res) => {
   try {
-    const { toUserId } = req.body;
-    const fromUserId = "66275896e95bf0885e3a89a1"; // Mocking current user
+    const { toUserId, fromUserId: passedFromId } = req.body;
+    const fromUserId = passedFromId || "66275896e95bf0885e3a89a1"; // Current logged in user
 
     const existingRequest = await FriendRequest.findOne({
       fromUser: fromUserId,
@@ -226,6 +226,13 @@ app.post('/api/friends/request', async (req, res) => {
     });
 
     await newRequest.save();
+    
+    // Real-time Notification
+    io.emit('new_friend_request', { 
+      toUserId, 
+      fromUserId 
+    });
+
     res.status(201).json(newRequest);
   } catch (error) {
     res.status(500).json({ error: error.message });

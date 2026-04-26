@@ -541,7 +541,11 @@ app.get('/api/posts', async (req, res) => {
       query.createdAt = { $gt: new Date(parseInt(since)) };
     }
 
-    const posts = await Post.find(query).sort({ createdAt: -1 }).limit(20).lean();
+    const posts = await Post.find(query)
+      .sort({ createdAt: -1 })
+      .limit(15)
+      .select('user text images likesCount comments createdAt likes')
+      .lean();
     
     // Compute isLiked server-side and remove the large likes array to save bandwidth
     const postsWithLikeStatus = posts.map(post => {

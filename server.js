@@ -1,12 +1,22 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const cloudinary = require('cloudinary').v2;
 const connectDB = require('./config/database');
 const Message = require('./models/Message');
 const User = require('./models/User');
 const Post = require('./models/Post');
 const FriendRequest = require('./models/FriendRequest');
+const Notification = require('./models/Notification');
+
+// Cloudinary Configuration
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 const app = express();
 const server = http.createServer(app);
@@ -27,6 +37,55 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Connect to MongoDB
 connectDB();
+
+// Helper to create notification
+const createNotification = async (recipient, sender, type, post = null, message = '') => {
+  try {
+    if (recipient.toString() === sender.toString()) return; // Don't notify self
+    
+    const notification = new Notification({
+      recipient,
+      sender,
+      type,
+      post,
+      message
+    });
+    await notification.save();
+    
+    // Emit real-time notification
+    const senderUser = await User.findById(sender).select('name avatar');
+    io.to(recipient.toString()).emit('newNotification', {
+      _id: notification._id,
+      type,
+      fromUser: senderUser,
+      message,
+      createdAt: notification.createdAt,
+      post
+    });
+  } catch (error) {
+    console.error('Error creating notification:', error);
+  }
+};
+
+// Cloudinary Signature Route for Secure Frontend Uploads
+app.get('/api/cloudinary/signature', (req, res) => {
+  try {
+    const timestamp = Math.round(new Date().getTime() / 1000);
+    const signature = cloudinary.utils.api_sign_request(
+      { timestamp },
+      process.env.CLOUDINARY_API_SECRET
+    );
+    res.json({
+      signature,
+      timestamp,
+      cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+      apiKey: process.env.CLOUDINARY_API_KEY
+    });
+  } catch (error) {
+    console.error('Cloudinary Signature Error:', error);
+    res.status(500).json({ error: 'Failed to generate signature' });
+  }
+});
 
 // REST API Routes
 
@@ -153,15 +212,82 @@ app.put('/api/auth/profile/:id', async (req, res) => {
   }
 });
 
-// Search Users
+// Unified Profile Endpoint for Fast Loading
+app.get('/api/profile/full/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { currentUserId } = req.query;
+    if (currentUserId === 'undefined' || currentUserId === 'null') currentUserId = null;
+    
+    // Fetch everything in parallel with .lean() for max speed
+    const [user, posts, friendships, targetStatus] = await Promise.all([
+      User.findById(id).select('-password').lean(),
+      Post.find({ "user._id": id }).sort({ createdAt: -1 }).lean(),
+      FriendRequest.find({
+        $or: [{ fromUser: id }, { toUser: id }],
+        status: 'accepted'
+      }).populate('fromUser toUser', 'name avatar').lean(),
+      currentUserId ? FriendRequest.findOne({
+        $or: [
+          { fromUser: currentUserId, toUser: id },
+          { fromUser: id, toUser: currentUserId }
+        ]
+      }).lean() : null
+    ]);
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Process friends and ensure uniqueness
+    const uniqueFriendsMap = new Map();
+    friendships.forEach(f => {
+      if (!f.fromUser || !f.toUser) return;
+      const friend = f.fromUser._id.toString() === id ? f.toUser : f.fromUser;
+      if (friend && !uniqueFriendsMap.has(friend._id.toString())) {
+        uniqueFriendsMap.set(friend._id.toString(), friend);
+      }
+    });
+    const friendsList = Array.from(uniqueFriendsMap.values());
+
+    // Calculate total likes
+    const totalLikes = posts.reduce((sum, post) => sum + (post.likesCount || 0), 0);
+
+    // Format likes for display (e.g., 4.5M if it was that high, but here we provide raw number)
+    const formatCount = (num) => {
+      if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+      if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+      return num.toString();
+    };
+
+    res.json({
+      user,
+      posts,
+      friends: friendsList,
+      stats: {
+        postsCount: posts.length,
+        friendsCount: friendsList.length,
+        likesCount: formatCount(totalLikes),
+        rawLikes: totalLikes
+      },
+      friendStatus: targetStatus ? (targetStatus.status === 'accepted' ? 'friends' : (targetStatus.fromUser.toString() === currentUserId ? 'requested' : 'pending')) : 'none'
+    });
+
+  } catch (error) {
+    console.error('Error fetching full profile:', error);
+    res.status(500).json({ error: 'Failed to fetch full profile' });
+  }
+});
+
+// Search Users - Simple fast regex
 app.get('/api/users/search', async (req, res) => {
   try {
     const { q } = req.query;
-    if (!q) return res.json([]);
+    if (!q || q.trim().length === 0) return res.json([]);
     
     const users = await User.find({
-      name: { $regex: q, $options: 'i' }
-    }).select('name avatar bio').limit(10);
+      name: { $regex: q.trim(), $options: 'i' }
+    }).select('name avatar bio').limit(10).lean();
     
     res.json(users);
   } catch (error) {
@@ -170,12 +296,24 @@ app.get('/api/users/search', async (req, res) => {
   }
 });
 
+// Get ALL users (for local search - lightweight)
+app.get('/api/users/all', async (req, res) => {
+  try {
+    const users = await User.find().select('name avatar').lean();
+    res.json(users);
+  } catch (error) {
+    console.error('Error fetching all users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
 // ========== Friendship Routes ==========
 
 // Get friend status
 app.get('/api/friends/status/:userId', async (req, res) => {
   try {
-    const fromUserId = req.query.currentUserId;
+    let fromUserId = req.query.currentUserId;
+    if (fromUserId === 'undefined' || fromUserId === 'null') fromUserId = null;
     if (!fromUserId) return res.status(400).json({ error: 'currentUserId required' });
     const toUserId = req.params.userId;
 
@@ -232,13 +370,16 @@ app.post('/api/friends/request', async (req, res) => {
       fromUserId 
     });
 
+    // Send real-time notification if recipient is online
+    createNotification(toUserId, fromUserId, 'FRIEND_REQUEST', null, 'sent you a friend request!');
+
     res.status(201).json(newRequest);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get all pending requests
+// Get all pending requests - Optimized with lean() for fast read
 app.get('/api/friends/requests', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -246,7 +387,7 @@ app.get('/api/friends/requests', async (req, res) => {
     const requests = await FriendRequest.find({
       toUser: userId,
       status: 'pending'
-    }).populate('fromUser', 'name avatar');
+    }).populate('fromUser', 'name avatar').lean();
     
     // Filter out requests where user might have been deleted (null fromUser)
     const validRequests = requests.filter(r => r.fromUser !== null);
@@ -268,6 +409,9 @@ app.post('/api/friends/accept', async (req, res) => {
     request.status = 'accepted';
     await request.save();
     
+    // Create Notification
+    createNotification(request.fromUser, request.toUser, 'FRIEND_ACCEPT', null, 'accepted your friend request!');
+
     res.json({ message: 'Request accepted' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -290,23 +434,59 @@ app.post('/api/friends/cancel', async (req, res) => {
   }
 });
 
-// Get friends list
+// Get friends list - Optimized with lean() for fast read
 app.get('/api/friends/list/:userId', async (req, res) => {
   try {
     const userId = req.params.userId;
     const friendships = await FriendRequest.find({
       $or: [{ fromUser: userId }, { toUser: userId }],
       status: 'accepted'
-    }).populate('fromUser toUser', 'name avatar');
+    }).populate('fromUser toUser', 'name avatar').lean();
     
-    const friends = friendships.map(f => {
-      if (!f.fromUser || !f.toUser) return null;
-      return f.fromUser._id.toString() === userId ? f.toUser : f.fromUser;
-    }).filter(f => f !== null);
+    const uniqueFriendsMap = new Map();
+    friendships.forEach(f => {
+      if (!f.fromUser || !f.toUser) return;
+      const friend = f.fromUser._id.toString() === userId ? f.toUser : f.fromUser;
+      if (friend && !uniqueFriendsMap.has(friend._id.toString())) {
+        uniqueFriendsMap.set(friend._id.toString(), friend);
+      }
+    });
     
-    res.json(friends);
+    res.json(Array.from(uniqueFriendsMap.values()));
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== Notification Routes ==========
+
+// Get notification history for a user
+app.get('/api/notifications', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+
+    const notifications = await Notification.find({ recipient: userId })
+      .sort({ createdAt: -1 })
+      .populate('sender', 'name avatar')
+      .limit(50)
+      .lean();
+
+    res.json(notifications);
+  } catch (error) {
+    console.error('Error fetching notifications:', error);
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+// Mark all as read
+app.post('/api/notifications/read', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    await Notification.updateMany({ recipient: userId, read: false }, { $set: { read: true } });
+    res.json({ message: 'Success' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update' });
   }
 });
 
@@ -346,11 +526,45 @@ app.post('/api/posts', async (req, res) => {
 // Get all posts
 app.get('/api/posts', async (req, res) => {
   try {
-    const posts = await Post.find().sort({ createdAt: -1 }).limit(20);
-    res.json(posts);
+    const { userId } = req.query;
+    const posts = await Post.find().sort({ createdAt: -1 }).limit(20).lean();
+    
+    // Compute isLiked server-side with proper ObjectId comparison
+    const postsWithLikeStatus = posts.map(post => {
+      const isLiked = (userId && post.likes) 
+        ? post.likes.some(likeId => likeId.toString() === userId.toString()) 
+        : false;
+      return {
+        ...post,
+        isLiked,
+        likesCount: post.likes ? post.likes.length : 0 // Always derive from source of truth
+      };
+    });
+    
+    res.json(postsWithLikeStatus);
   } catch (error) {
     console.error('Error fetching posts:', error);
     res.status(500).json({ error: 'Failed to fetch posts' });
+  }
+});
+
+// One-time data repair: sync likesCount with likes.length for all posts
+app.post('/api/posts/sync-likes', async (req, res) => {
+  try {
+    const posts = await Post.find();
+    let fixed = 0;
+    for (const post of posts) {
+      const correctCount = post.likes.length;
+      if (post.likesCount !== correctCount) {
+        post.likesCount = correctCount;
+        await post.save();
+        fixed++;
+      }
+    }
+    res.json({ message: `Synced ${fixed} posts`, total: posts.length, fixed });
+  } catch (error) {
+    console.error('Error syncing likes:', error);
+    res.status(500).json({ error: 'Failed to sync likes' });
   }
 });
 
@@ -399,22 +613,60 @@ app.post('/api/posts/:id/like', async (req, res) => {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    // Toggle logic
-    const likesIndex = post.likes.indexOf(userId);
-    if (likesIndex === -1) {
-      // Like
-      post.likes.push(userId);
-      post.likesCount = post.likes.length;
+    // Proper ObjectId comparison using .toString()
+    const wasLiked = post.likes.some(likeId => likeId.toString() === userId.toString());
+    let updatedPost;
+
+    if (!wasLiked) {
+      // Like: Add user to likes array
+      updatedPost = await Post.findOneAndUpdate(
+        { _id: id, likes: { $ne: userId } },
+        { $addToSet: { likes: userId } },
+        { new: true }
+      );
+      
+      if (!updatedPost) {
+        // User already liked (concurrent request) — just fetch current state
+        updatedPost = await Post.findById(id);
+      } else {
+        // Sync likesCount from source of truth
+        updatedPost.likesCount = updatedPost.likes.length;
+        await updatedPost.save();
+        
+        // Send notification (only on new like, not on concurrent duplicate)
+        createNotification(post.user._id, userId, 'LIKE', post._id, 'liked your post');
+      }
     } else {
-      // Unlike
-      post.likes.splice(likesIndex, 1);
-      post.likesCount = post.likes.length;
+      // Unlike: Remove user from likes array
+      updatedPost = await Post.findOneAndUpdate(
+        { _id: id, likes: userId },
+        { $pull: { likes: userId } },
+        { new: true }
+      );
+      
+      if (!updatedPost) {
+        updatedPost = await Post.findById(id);
+      } else {
+        // Sync likesCount from source of truth
+        updatedPost.likesCount = updatedPost.likes.length;
+        await updatedPost.save();
+      }
     }
 
-    await post.save();
+    const finalLikesCount = updatedPost.likes.length;
+    const finalIsLiked = updatedPost.likes.some(likeId => likeId.toString() === userId.toString());
+
+    // Emit real-time like update to ALL connected clients
+    io.emit('postLikeUpdate', {
+      postId: id,
+      likesCount: finalLikesCount,
+      userId: userId,
+      isLiked: finalIsLiked
+    });
+
     res.json({ 
-      likesCount: post.likesCount, 
-      isLiked: post.likes.includes(userId) 
+      likesCount: finalLikesCount, 
+      isLiked: finalIsLiked
     });
   } catch (error) {
     console.error('Error toggling like:', error);
@@ -447,8 +699,22 @@ app.post('/api/posts/:id/comments', async (req, res) => {
     post.comments.push(newComment);
     await post.save();
 
-    // Return the newly created comment object (including generated _id)
-    res.status(201).json(post.comments[post.comments.length - 1]);
+    // Create Notification
+    const sender = await User.findOne({ name: user });
+    if (sender) {
+      createNotification(post.user._id, sender._id, 'COMMENT', post._id, `commented: ${text}`);
+    }
+
+    const savedComment = post.comments[post.comments.length - 1];
+
+    // Emit real-time comment update to ALL connected clients
+    io.emit('postCommentUpdate', {
+      postId: id,
+      comment: savedComment
+    });
+
+    // Return the newly created comment object
+    res.status(201).json(savedComment);
   } catch (error) {
     console.error('Error adding comment:', error);
     res.status(500).json({ error: 'Failed to add comment' });
@@ -462,13 +728,92 @@ app.get('/api/messages/:chatId', async (req, res) => {
   try {
     const { chatId } = req.params;
     const messages = await Message.find({ chatId })
-      .sort({ timestamp: 1 }) // Sort by timestamp ascending (oldest first)
-      .limit(100); // Limit to last 100 messages
+      .sort({ timestamp: -1 }) // Sort by timestamp descending (newest first)
+      .limit(100) // Limit to last 100 messages
+      .lean(); // Faster query execution
+
+    // Reverse the messages to display oldest first in the UI
+    messages.reverse();
 
     res.json(messages);
   } catch (error) {
     console.error('Error fetching messages:', error);
     res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+// Helper to get chat list data
+async function getChatListForUser(userId) {
+  if (!userId || userId === 'undefined' || userId === 'null') {
+    return [];
+  }
+  
+  // Find all messages involving this user
+  const messages = await Message.find({ chatId: { $regex: userId } })
+    .sort({ timestamp: -1 })
+    .lean();
+
+  // Group by chatId to get the latest message per chat
+  const chatMap = new Map();
+  messages.forEach(msg => {
+    if (!chatMap.has(msg.chatId)) {
+      chatMap.set(msg.chatId, msg);
+    }
+  });
+
+  // Extract friend details and format
+  const chats = [];
+  for (const [chatId, latestMsg] of chatMap.entries()) {
+    const ids = chatId.split('_');
+    if (ids.length !== 2) continue;
+    
+    const friendId = ids[0] === userId ? ids[1] : ids[0];
+    const friend = await User.findById(friendId).select('name avatar').lean();
+    
+    if (friend) {
+      const msgDate = new Date(latestMsg.timestamp);
+      const now = new Date();
+      const diffMs = now.getTime() - msgDate.getTime();
+      const diffMins = Math.floor(diffMs / 60000);
+      const diffHours = Math.floor(diffMins / 60);
+      const diffDays = Math.floor(diffHours / 24);
+      
+      let timeStr = msgDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (diffMins < 1) timeStr = 'Just now';
+      else if (diffMins < 60) timeStr = `${diffMins}m ago`;
+      else if (diffHours < 24) timeStr = `${diffHours}h ago`;
+      else if (diffDays === 1) timeStr = 'Yesterday';
+
+      const unreadCount = messages.filter(
+        m => m.chatId === latestMsg.chatId && m.senderId === friendId && m.status !== 'read'
+      ).length;
+
+      chats.push({
+        id: friend._id.toString(),
+        name: friend.name,
+        avatar: friend.avatar || 'https://via.placeholder.com/150',
+        message: latestMsg.text,
+        time: timeStr,
+        timestamp: latestMsg.timestamp,
+        unread: unreadCount,
+        online: true
+      });
+    }
+  }
+
+  chats.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return chats;
+}
+
+// Get chat history (list of recent chats) for a user
+app.get('/api/chats/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const chats = await getChatListForUser(userId);
+    res.json(chats);
+  } catch (error) {
+    console.error('Error fetching chat list:', error);
+    res.status(500).json({ error: 'Failed to fetch chat list' });
   }
 });
 
@@ -517,10 +862,16 @@ io.on('connection', (socket) => {
     console.log(`User ${socket.id} left chat: ${chatId}`);
   });
 
+  // Join a private user room for notifications
+  socket.on('joinUser', (userId) => {
+    socket.join(userId);
+    console.log(`User ${socket.id} joined personal room: ${userId}`);
+  });
+
   // Handle new message
   socket.on('sendMessage', async (data) => {
     try {
-      const { chatId, senderId, senderName, text } = data;
+      const { chatId, senderId, senderName, text, recipientId } = data;
 
       if (!chatId || !senderId || !text) {
         return socket.emit('error', { message: 'Missing required fields' });
@@ -538,6 +889,18 @@ io.on('connection', (socket) => {
 
       // Broadcast to all clients in this chat room (including sender)
       io.to(chatId).emit('newMessage', message);
+
+      // Update chat list for sender
+      const senderChats = await getChatListForUser(senderId);
+      io.to(senderId).emit('chatListUpdate', senderChats);
+
+      // Send real-time notification to the recipient
+      if (recipientId) {
+        createNotification(recipientId, senderId, 'MESSAGE', null, text);
+        
+        const recipientChats = await getChatListForUser(recipientId);
+        io.to(recipientId).emit('chatListUpdate', recipientChats);
+      }
     } catch (error) {
       console.error('Error handling message:', error);
       socket.emit('error', { message: 'Failed to send message' });
@@ -548,6 +911,61 @@ io.on('connection', (socket) => {
   socket.on('typing', (data) => {
     const { chatId, senderName, isTyping } = data;
     socket.to(chatId).emit('userTyping', { senderName, isTyping });
+  });
+
+  // Handle read receipts
+  socket.on('markMessagesRead', async (data) => {
+    try {
+      const { chatId, readerId } = data;
+      // Update all messages in this chat sent by the OTHER person that are not 'read'
+      const result = await Message.updateMany(
+        { chatId, senderId: { $ne: readerId }, status: { $ne: 'read' } },
+        { $set: { status: 'read' } }
+      );
+      
+      // Always notify the reader's other sessions to clear the unread indicator
+      const updatedChats = await getChatListForUser(readerId);
+      io.to(readerId).emit('chatListUpdate', updatedChats);
+
+      if (result.modifiedCount > 0) {
+        // Broadcast to the chat room so the sender's UI updates
+        io.to(chatId).emit('messagesRead', { chatId, readerId });
+      }
+    } catch (error) {
+      console.error('Error marking messages as read:', error);
+    }
+  });
+
+  // Handle request for full chat list over socket
+  socket.on('requestChatList', async (userId) => {
+    try {
+      const chats = await getChatListForUser(userId);
+      socket.emit('chatListUpdate', chats);
+    } catch (error) {
+      console.error('Error fetching chat list via socket:', error);
+    }
+  });
+
+  // Handle request for chat history over socket (with pagination)
+  socket.on('requestMessages', async (data) => {
+    try {
+      const { chatId, skip = 0, limit = 20 } = typeof data === 'string' ? { chatId: data } : data;
+      
+      const messages = await Message.find({ chatId })
+        .sort({ timestamp: -1 }) // Newest first
+        .skip(skip)
+        .limit(limit)
+        .lean();
+        
+      socket.emit('chatHistory', { 
+        chatId, 
+        messages, 
+        hasMore: messages.length === limit,
+        skip: skip 
+      });
+    } catch (error) {
+      console.error('Error fetching messages via socket:', error);
+    }
   });
 
   // Handle disconnection

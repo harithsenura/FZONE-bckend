@@ -20,4 +20,8 @@ const friendRequestSchema = new mongoose.Schema({
   timestamps: true
 });
 
+friendRequestSchema.index({ fromUser: 1, toUser: 1 });
+friendRequestSchema.index({ status: 1 });
+friendRequestSchema.index({ toUser: 1, status: 1 }); // Compound index for fast pending requests lookup
+
 module.exports = mongoose.model('FriendRequest', friendRequestSchema);

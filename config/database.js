@@ -6,6 +6,9 @@ const connectDB = async () => {
     
     await mongoose.connect(mongoURI, {
       family: 4, // Force IPv4 to resolve ENOTFOUND issues
+      maxPoolSize: 10, // Increase connection pool for concurrent requests
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
     });
 
     console.log('✅ MongoDB Connected Successfully');

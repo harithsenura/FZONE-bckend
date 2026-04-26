@@ -62,4 +62,8 @@ userSchema.methods.toJSON = function() {
   return userObject;
 };
 
+// Index for fast name search
+userSchema.index({ name: 'text' });
+userSchema.index({ name: 1 });
+
 module.exports = mongoose.model('User', userSchema);

@@ -886,12 +886,13 @@ app.post('/api/stories/:id/view', async (req, res) => {
   }
 });
 
-// Get story viewers (for bottom sheet)
+// Get story viewers and likers (for bottom sheet)
 app.get('/api/stories/:id/viewers', async (req, res) => {
   try {
     const { id } = req.params;
     const story = await Story.findById(id)
       .populate('views.user', 'name avatar')
+      .populate('likes', 'name avatar')
       .lean();
 
     if (!story) return res.status(404).json({ error: 'Story not found' });
@@ -901,9 +902,11 @@ app.get('/api/stories/:id/viewers', async (req, res) => {
       viewers: story.views.map(v => ({
         user: v.user,
         seenAt: v.seenAt
-      })).reverse() // Show newest viewers first
+      })).reverse(), // Show newest viewers first
+      likers: story.likes || []
     });
   } catch (error) {
+    console.error('Error fetching viewers/likers:', error);
     res.status(500).json({ error: 'Failed to fetch viewers' });
   }
 });

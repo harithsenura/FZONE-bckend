@@ -516,6 +516,13 @@ app.post('/api/posts', async (req, res) => {
     });
 
     await post.save();
+    
+    // Populate user info for the socket event
+    const populatedPost = await Post.findById(post._id).lean();
+    
+    // Emit real-time post update to ALL connected clients
+    io.emit('new_post', populatedPost);
+
     res.status(201).json(post);
   } catch (error) {
     console.error('Error creating post:', error);
@@ -526,8 +533,14 @@ app.post('/api/posts', async (req, res) => {
 // Get all posts
 app.get('/api/posts', async (req, res) => {
   try {
-    const { userId } = req.query;
-    const posts = await Post.find().sort({ createdAt: -1 }).limit(20).lean();
+    const { userId, since } = req.query;
+    
+    let query = {};
+    if (since && since !== 'undefined') {
+      query.createdAt = { $gt: new Date(parseInt(since)) };
+    }
+
+    const posts = await Post.find(query).sort({ createdAt: -1 }).limit(20).lean();
     
     // Compute isLiked server-side with proper ObjectId comparison
     const postsWithLikeStatus = posts.map(post => {

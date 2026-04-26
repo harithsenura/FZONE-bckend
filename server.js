@@ -691,7 +691,7 @@ app.post('/api/posts/:id/like', async (req, res) => {
 app.post('/api/posts/:id/comments', async (req, res) => {
   try {
     const { id } = req.params;
-    const { user, avatar, text } = req.body;
+    const { user, avatar, text, parentId } = req.body;
 
     if (!user || !text) {
       return res.status(400).json({ error: 'Username and comment text are required' });
@@ -706,7 +706,8 @@ app.post('/api/posts/:id/comments', async (req, res) => {
       user,
       avatar: avatar || '',
       text,
-      time: new Date()
+      time: new Date(),
+      parentId: parentId || null
     };
 
     post.comments.push(newComment);

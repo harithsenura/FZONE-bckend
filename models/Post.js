@@ -26,7 +26,8 @@ const postSchema = new mongoose.Schema({
     user: { type: String, required: true },
     avatar: { type: String },
     text: { type: String, required: true },
-    time: { type: Date, default: Date.now }
+    time: { type: Date, default: Date.now },
+    parentId: { type: mongoose.Schema.Types.ObjectId, default: null }
   }],
 }, { timestamps: true });
 

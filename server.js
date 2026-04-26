@@ -605,6 +605,10 @@ app.delete('/api/posts/:id', async (req, res) => {
     }
 
     await Post.findByIdAndDelete(id);
+    
+    // Emit real-time post deletion to ALL connected clients
+    io.emit('post_deleted', { postId: id });
+
     res.json({ message: 'Post deleted successfully' });
   } catch (error) {
     console.error('Error deleting post:', error);

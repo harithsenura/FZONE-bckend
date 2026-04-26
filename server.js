@@ -10,6 +10,7 @@ const User = require('./models/User');
 const Post = require('./models/Post');
 const FriendRequest = require('./models/FriendRequest');
 const Notification = require('./models/Notification');
+const Story = require('./models/Story');
 
 // Cloudinary Configuration
 cloudinary.config({
@@ -732,6 +733,178 @@ app.post('/api/posts/:id/comments', async (req, res) => {
   } catch (error) {
     console.error('Error adding comment:', error);
     res.status(500).json({ error: 'Failed to add comment' });
+  }
+});
+
+
+// ========== Story Routes ==========
+
+// Create a new story
+app.post('/api/stories', async (req, res) => {
+  try {
+    const { userId, content, type } = req.body;
+
+    if (!userId || !content) {
+      return res.status(400).json({ error: 'User ID and content are required' });
+    }
+
+    // Check 10 stories per day limit
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    
+    const storiesCount = await Story.countDocuments({
+      user: userId,
+      createdAt: { $gte: startOfDay }
+    });
+
+    if (storiesCount >= 10) {
+      return res.status(400).json({ error: 'You have reached the daily limit of 10 stories' });
+    }
+
+    const story = new Story({
+      user: userId,
+      content,
+      type: type || 'image'
+    });
+
+    await story.save();
+    
+    const populatedStory = await Story.findById(story._id).populate('user', 'name avatar').lean();
+    
+    // Emit real-time story update
+    io.emit('new_story', populatedStory);
+
+    res.status(201).json(populatedStory);
+  } catch (error) {
+    console.error('Error creating story:', error);
+    res.status(500).json({ error: 'Failed to create story' });
+  }
+});
+
+// Get all stories grouped by user
+app.get('/api/stories', async (req, res) => {
+  try {
+    // Get all active stories (TTL handles expiration, but we filter just in case)
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    
+    const stories = await Story.find({
+      createdAt: { $gte: twentyFourHoursAgo }
+    })
+    .populate('user', 'name avatar')
+    .sort({ createdAt: -1 })
+    .lean();
+
+    // Group stories by user
+    const groupedStories = stories.reduce((acc, story) => {
+      const userId = story.user._id.toString();
+      if (!acc[userId]) {
+        acc[userId] = {
+          user: story.user,
+          stories: []
+        };
+      }
+      acc[userId].stories.push(story);
+      return acc;
+    }, {});
+
+    res.json(Object.values(groupedStories));
+  } catch (error) {
+    console.error('Error fetching stories:', error);
+    res.status(500).json({ error: 'Failed to fetch stories' });
+  }
+});
+
+// Delete a story
+app.delete('/api/stories/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body; // To verify ownership
+
+    const story = await Story.findById(id);
+    if (!story) return res.status(404).json({ error: 'Story not found' });
+
+    if (story.user.toString() !== userId) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    await Story.findByIdAndDelete(id);
+    res.json({ message: 'Story deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting story:', error);
+    res.status(500).json({ error: 'Failed to delete story' });
+  }
+});
+
+// Like/Unlike a story
+app.post('/api/stories/:id/like', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+
+    const story = await Story.findById(id);
+    if (!story) return res.status(404).json({ error: 'Story not found' });
+
+    const isLiked = story.likes.includes(userId);
+    if (isLiked) {
+      story.likes = story.likes.filter(id => id.toString() !== userId);
+    } else {
+      story.likes.push(userId);
+      // Optional: Create notification for story like
+      if (story.user.toString() !== userId) {
+        createNotification(story.user, userId, 'LIKE', null, 'liked your story');
+      }
+    }
+
+    await story.save();
+    res.json({ likes: story.likes, isLiked: !isLiked });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to like story' });
+  }
+});
+
+// Mark story as viewed
+app.post('/api/stories/:id/view', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+
+    if (!userId) return res.status(400).json({ error: 'User ID required' });
+
+    const story = await Story.findById(id);
+    if (!story) return res.status(404).json({ error: 'Story not found' });
+
+    // Don't count owner's view or duplicate views
+    const alreadyViewed = story.views.some(v => v.user.toString() === userId);
+    if (story.user.toString() !== userId && !alreadyViewed) {
+      story.views.push({ user: userId });
+      await story.save();
+    }
+
+    res.json({ viewsCount: story.views.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to mark story as viewed' });
+  }
+});
+
+// Get story viewers (for bottom sheet)
+app.get('/api/stories/:id/viewers', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const story = await Story.findById(id)
+      .populate('views.user', 'name avatar')
+      .lean();
+
+    if (!story) return res.status(404).json({ error: 'Story not found' });
+
+    res.json({
+      viewCount: story.views.length,
+      viewers: story.views.map(v => ({
+        user: v.user,
+        seenAt: v.seenAt
+      })).reverse() // Show newest viewers first
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch viewers' });
   }
 });
 

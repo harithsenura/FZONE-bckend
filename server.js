@@ -543,21 +543,15 @@ app.get('/api/posts', async (req, res) => {
 
     const posts = await Post.find(query).sort({ createdAt: -1 }).limit(20).lean();
     
-    // Compute isLiked server-side and remove the large likes array to save bandwidth
+    // Compute isLiked server-side with proper ObjectId comparison
     const postsWithLikeStatus = posts.map(post => {
       const isLiked = (userId && post.likes) 
         ? post.likes.some(likeId => likeId.toString() === userId.toString()) 
         : false;
-      
-      const likesCount = post.likes ? post.likes.length : 0;
-      
-      // Remove the likes array from the object sent to the client
-      const { likes, ...postData } = post;
-      
       return {
-        ...postData,
+        ...post,
         isLiked,
-        likesCount
+        likesCount: post.likes ? post.likes.length : 0 // Always derive from source of truth
       };
     });
     
